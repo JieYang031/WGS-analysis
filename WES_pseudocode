@@ -1,0 +1,40 @@
+##RadPath project pseudocode##
+
+module load fastqc/0.11.5
+module load bwa/0.7.15
+module load samtools/1.3.1
+module load picard/2.9.0
+module load samtools/1.4
+module load gatk/3.7
+
+##fastqc
+
+fastqc fastq.gz
+
+##mapping
+
+bwa mem -t 4 -T 0  refgenome  fastq.gz  > sample.sam
+samtools view -Shb sample.sam > sample.bam
+java -jar picard.jar SortSam CREATE_INDEX=true INPUT=sample.bam OUTPUT=sample.s.bam SORT_ORDER=coordinate  VALIDATION_STRINGENCY=STRICT
+samtools index sample.s.bam
+##add readgroup, optional
+java -jar picard.jar AddOrReplaceReadGroups I=sample.s.bam O=sample.s.rg.bam RGID = 1_Lane7  RGLB = lib1 RGPL = illumina  RGPU = 1_Lane7_S26 RGSM = S26
+##merge bam files for each sample (when have multiple fastq files for one sample)
+samtools merge sample.s.rg.m.bam sample.s.rg.1.bam sample.s.rg.2.bam
+java -jar picard.jar MarkDuplicates  I=sample.s.rg.m.bam O=sample.s.rg.m.dup.bam M=markdup_metrics.txt
+samtools index sample.s.rg.m.dup.bam
+java -jar GenomeAnalysisTK.jar -T RealignerTargetCreator  -R refgenome -known 1000G_phase1.snps.high_confidence.hg38.vcf -I sample.s.rg.m.dup.bam  -o realign_target.intervals 
+java  -jar GenomeAnalysisTK.jar -T IndelRealigner -R refgenome -known 1000G_phase1.snps.high_confidence.hg38.vcf -targetIntervals  realign_target.intervals --noOriginalAlignmentTags -I  sample.s.rg.m.dup.bam -o sample.s.rg.m.dup.realign.bam
+java -jar GenomeAnalysisTK.jar -T BaseRecalibrator -R refgenome -I sample.s.rg.m.dup.realign.bam -knownSites dbsnp_146.hg38.vcf -o sample.s.rg.m.dup.realign.recal.table
+java -jar GenomeAnalysisTK.jar -T PrintReads -R refgenome -I sample.s.rg.m.dup.realign.bam --BQSR sample.s.rg.m.dup.realign.recal.table -o output.bam
+
+##Mutect2 to detect mutations
+module load gatk/3.7
+java -jar GenomeAnalysisTK.jar   -T MuTect2 -R  refgenome -I:tumor tumor.bam -I:normal normal.bam -cosmic CosmicCodingMuts_chr_M_sorted.vcf  --dbsnp dbsnp_146.hg38.vcf  -L  hglft_genome_4d75_9553a0_hg38_noAlt.bed    -o  sample.vcf
+
+##calculate depth of coverage
+module load gatk/3.7
+java -jar GenomeAnalysisTK.jar   -R refgenome  -T DepthOfCoverage  -I sample.bam  -o depthcoverage.list
+
+##annovar
+perl annovar/table_annovar.pl sample.vcf annovar/humandb/ -buildver hg38 -out sample_name -remove -protocol refGene,knownGene,ensGene,cytoBand,dbnsfp33a,dbnsfp31a_interpro,dbscsnv11,intervar_20180118,cosmic70,exac03,gnomad_exome,kaviar_20150923,hrcr1,gme,mcap,revel,avsnp150,nci60,clinvar_20170905  -operation g,g,g,r,f,f,f,f,f,f,f,f,f,f,f,f,f,f,f -nastring . -vcfinput
